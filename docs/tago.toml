@@ -1,0 +1,10 @@
+title       = "crossref"
+baseURL     = "https://crossref-cli.tamnd.com/"
+description = "Browse Crossref scholarly metadata by DOI"
+contentDir  = "content"
+outputDir   = "public"
+theme       = "tago-doks"
+syntaxHighlight = "true"
+
+[params]
+github = "https://github.com/tamnd/crossref-cli"
