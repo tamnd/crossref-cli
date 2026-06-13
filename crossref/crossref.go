@@ -237,7 +237,9 @@ type journalResp struct {
 }
 
 type typesResp struct {
-	Message []wireType `json:"message"`
+	Message struct {
+		Items []wireType `json:"items"`
+	} `json:"message"`
 }
 
 // ─── mapping helpers ─────────────────────────────────────────────────────────
@@ -389,8 +391,8 @@ func (c *Client) ListTypes(ctx context.Context) ([]WorkType, error) {
 	if err := c.getJSON(ctx, rawURL, &resp); err != nil {
 		return nil, err
 	}
-	out := make([]WorkType, len(resp.Message))
-	for i, t := range resp.Message {
+	out := make([]WorkType, len(resp.Message.Items))
+	for i, t := range resp.Message.Items {
 		out[i] = WorkType(t)
 	}
 	return out, nil

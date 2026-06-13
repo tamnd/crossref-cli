@@ -212,11 +212,14 @@ func TestListTypes(t *testing.T) {
 	const body = `{
 		"status": "ok",
 		"message-type": "type-list",
-		"message": [
-			{"id": "journal-article", "label": "Journal Article"},
-			{"id": "book-chapter", "label": "Book Chapter"},
-			{"id": "dataset", "label": "Dataset"}
-		]
+		"message": {
+			"total-results": 3,
+			"items": [
+				{"id": "journal-article", "label": "Journal Article"},
+				{"id": "book-chapter", "label": "Book Chapter"},
+				{"id": "dataset", "label": "Dataset"}
+			]
+		}
 	}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(body))
