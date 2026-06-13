@@ -1,52 +1,84 @@
 // Package crossref is the library behind the crossref command line:
-// the HTTP client, request shaping, and the typed data models for crossref.
+// the HTTP client, request shaping, wire decoding, and typed data models
+// for the Crossref REST API.
 //
-// The Client here is the spine every command shares. It sets a real
-// User-Agent, paces requests so a busy session stays polite, and retries the
-// transient failures (429 and 5xx) that any public site throws under load.
-// Build your endpoint calls and JSON decoding on top of it.
+// The API is open and requires no authentication key. The polite pool
+// (higher rate limits) is accessed by supplying a mailto: address in the
+// User-Agent header, which DefaultConfig does automatically.
 package crossref
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 )
 
-// DefaultUserAgent identifies the client to crossref. A real, honest
-// User-Agent is both polite and the thing most likely to keep you unblocked.
-const DefaultUserAgent = "crossref/dev (+https://github.com/tamnd/crossref-cli)"
+const defaultBaseURL = "https://api.crossref.org"
 
-// Client talks to crossref over HTTP.
-type Client struct {
-	HTTP      *http.Client
+// DefaultUserAgent identifies the client and opts into the Crossref polite pool.
+const DefaultUserAgent = "crossref-cli/dev (mailto:tamnd87@gmail.com; +https://github.com/tamnd/crossref-cli)"
+
+// ErrNotFound is returned when the API returns a 404 or null body.
+var ErrNotFound = errors.New("not found")
+
+// Config holds constructor parameters.
+type Config struct {
+	BaseURL   string // default: "https://api.crossref.org"
 	UserAgent string
-	// Rate is the minimum gap between requests. Zero means no pacing.
-	Rate    time.Duration
-	Retries int
-
-	last time.Time
+	Rate      time.Duration // default: 50ms
+	Retries   int           // default: 3
+	Timeout   time.Duration // default: 30s
 }
 
-// NewClient returns a Client with sensible defaults: a 30s timeout, a 200ms
-// minimum gap between requests, and five retries on transient errors.
-func NewClient() *Client {
-	return &Client{
-		HTTP:      &http.Client{Timeout: 30 * time.Second},
+// DefaultConfig returns sensible defaults for the Crossref polite pool.
+func DefaultConfig() Config {
+	return Config{
+		BaseURL:   defaultBaseURL,
 		UserAgent: DefaultUserAgent,
-		Rate:      200 * time.Millisecond,
-		Retries:   5,
+		Rate:      50 * time.Millisecond,
+		Retries:   3,
+		Timeout:   30 * time.Second,
 	}
 }
 
-// Get fetches url and returns the response body. It paces and retries according
-// to the client's settings. The caller owns nothing extra; the body is read
-// fully and closed here.
-func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
+// Client talks to the Crossref REST API.
+type Client struct {
+	httpClient *http.Client
+	userAgent  string
+	baseURL    string
+	rate       time.Duration
+	retries    int
+	mu         sync.Mutex
+	last       time.Time
+}
+
+// NewClient returns a Client built from cfg.
+func NewClient(cfg Config) *Client {
+	base := cfg.BaseURL
+	if base == "" {
+		base = defaultBaseURL
+	}
+	return &Client{
+		httpClient: &http.Client{Timeout: cfg.Timeout},
+		userAgent:  cfg.UserAgent,
+		baseURL:    base,
+		rate:       cfg.Rate,
+		retries:    cfg.Retries,
+	}
+}
+
+// get fetches a URL with pacing and retries.
+func (c *Client) get(ctx context.Context, rawURL string) ([]byte, error) {
 	var lastErr error
-	for attempt := 0; attempt <= c.Retries; attempt++ {
+	for attempt := 0; attempt <= c.retries; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
@@ -54,7 +86,7 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 			case <-time.After(backoff(attempt)):
 			}
 		}
-		body, retry, err := c.do(ctx, url)
+		body, retry, err := c.do(ctx, rawURL)
 		if err == nil {
 			return body, nil
 		}
@@ -63,43 +95,47 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 			return nil, err
 		}
 	}
-	return nil, fmt.Errorf("get %s: %w", url, lastErr)
+	return nil, fmt.Errorf("get %s: %w", rawURL, lastErr)
 }
 
-func (c *Client) do(ctx context.Context, url string) (body []byte, retry bool, err error) {
+func (c *Client) do(ctx context.Context, rawURL string) ([]byte, bool, error) {
 	c.pace()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, false, err
 	}
-	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, true, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, false, ErrNotFound
+	}
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 		return nil, true, fmt.Errorf("http %d", resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, false, fmt.Errorf("http %d", resp.StatusCode)
 	}
-
-	b, err := io.ReadAll(resp.Body)
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
 		return nil, true, err
 	}
 	return b, false, nil
 }
 
-// pace blocks until at least Rate has passed since the previous request.
 func (c *Client) pace() {
-	if c.Rate <= 0 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.rate <= 0 {
 		return
 	}
-	if wait := c.Rate - time.Since(c.last); wait > 0 {
+	if wait := c.rate - time.Since(c.last); wait > 0 {
 		time.Sleep(wait)
 	}
 	c.last = time.Now()
@@ -111,4 +147,251 @@ func backoff(attempt int) time.Duration {
 		d = 5 * time.Second
 	}
 	return d
+}
+
+// getJSON fetches and JSON-decodes into v. Returns ErrNotFound when the body is null.
+func (c *Client) getJSON(ctx context.Context, rawURL string, v any) error {
+	body, err := c.get(ctx, rawURL)
+	if err != nil {
+		return err
+	}
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "null" {
+		return ErrNotFound
+	}
+	if err := json.Unmarshal(body, v); err != nil {
+		return fmt.Errorf("decode %s: %w", rawURL, err)
+	}
+	return nil
+}
+
+// normaliseDOI strips common DOI prefixes so the value can be URL-encoded cleanly.
+func normaliseDOI(doi string) string {
+	doi = strings.TrimSpace(doi)
+	doi = strings.TrimPrefix(doi, "https://doi.org/")
+	doi = strings.TrimPrefix(doi, "http://doi.org/")
+	doi = strings.TrimPrefix(doi, "doi:")
+	return doi
+}
+
+// ─── wire types ──────────────────────────────────────────────────────────────
+
+type wireWork struct {
+	DOI            string         `json:"DOI"`
+	Title          []string       `json:"title"`
+	Author         []wireAuthor   `json:"author"`
+	ContainerTitle []string       `json:"container-title"`
+	Published      *wireDateParts `json:"published"`
+	Type           string         `json:"type"`
+	Publisher      string         `json:"publisher"`
+	ReferencedBy   int            `json:"is-referenced-by-count"`
+	URL            string         `json:"URL"`
+}
+
+type wireAuthor struct {
+	Given  string `json:"given"`
+	Family string `json:"family"`
+}
+
+type wireDateParts struct {
+	DateParts [][]int `json:"date-parts"`
+}
+
+type wireJournal struct {
+	ISSN      []string      `json:"ISSN"`
+	Title     string        `json:"title"`
+	Publisher string        `json:"publisher"`
+	Subjects  []wireSubject `json:"subjects"`
+	URL       string        `json:"URL"`
+}
+
+type wireSubject struct {
+	Name string `json:"name"`
+	ASJC int    `json:"ASJC"`
+}
+
+type wireType struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+type worksResp struct {
+	Message struct {
+		Items        []wireWork `json:"items"`
+		TotalResults int        `json:"total-results"`
+	} `json:"message"`
+}
+
+type workResp struct {
+	Message wireWork `json:"message"`
+}
+
+type journalsListResp struct {
+	Message struct {
+		Items []wireJournal `json:"items"`
+	} `json:"message"`
+}
+
+type journalResp struct {
+	Message wireJournal `json:"message"`
+}
+
+type typesResp struct {
+	Message []wireType `json:"message"`
+}
+
+// ─── mapping helpers ─────────────────────────────────────────────────────────
+
+func wireWorkToWork(w wireWork, rank int) Work {
+	title := ""
+	if len(w.Title) > 0 {
+		title = w.Title[0]
+	}
+	journal := ""
+	if len(w.ContainerTitle) > 0 {
+		journal = w.ContainerTitle[0]
+	}
+	year := ""
+	if w.Published != nil && len(w.Published.DateParts) > 0 && len(w.Published.DateParts[0]) > 0 {
+		year = strconv.Itoa(w.Published.DateParts[0][0])
+	}
+	doi := strings.ToLower(w.DOI)
+	return Work{
+		Rank:      rank,
+		DOI:       doi,
+		Title:     title,
+		Authors:   formatAuthors(w.Author),
+		Journal:   journal,
+		Year:      year,
+		Type:      w.Type,
+		Citations: w.ReferencedBy,
+		URL:       "https://doi.org/" + doi,
+	}
+}
+
+func formatAuthors(authors []wireAuthor) string {
+	const maxShown = 3
+	parts := make([]string, 0, len(authors))
+	for i, a := range authors {
+		if i >= maxShown {
+			break
+		}
+		name := a.Family
+		if a.Given != "" {
+			runes := []rune(a.Given)
+			name = a.Family + " " + string(runes[0])
+		}
+		parts = append(parts, name)
+	}
+	s := strings.Join(parts, ", ")
+	if len(authors) > maxShown {
+		s += ", et al."
+	}
+	return s
+}
+
+func wireJournalToJournal(j wireJournal, rank int) Journal {
+	issn := strings.Join(j.ISSN, ", ")
+	subjects := make([]string, 0, len(j.Subjects))
+	for _, s := range j.Subjects {
+		subjects = append(subjects, s.Name)
+	}
+	u := j.URL
+	if u == "" {
+		u = "https://www.crossref.org/"
+	}
+	return Journal{
+		Rank:      rank,
+		ISSN:      issn,
+		Title:     j.Title,
+		Publisher: j.Publisher,
+		Subjects:  strings.Join(subjects, ", "),
+		URL:       u,
+	}
+}
+
+// ─── public methods ───────────────────────────────────────────────────────────
+
+// SearchWorks searches the /works endpoint by full text. workType may be empty.
+func (c *Client) SearchWorks(ctx context.Context, query string, limit int, workType string) ([]Work, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	params := url.Values{}
+	params.Set("query", query)
+	params.Set("rows", strconv.Itoa(limit))
+	params.Set("select", "DOI,title,author,container-title,published,type,publisher,is-referenced-by-count,URL")
+	if workType != "" {
+		params.Set("filter", "type:"+workType)
+	}
+	rawURL := c.baseURL + "/works?" + params.Encode()
+
+	var resp worksResp
+	if err := c.getJSON(ctx, rawURL, &resp); err != nil {
+		return nil, err
+	}
+	out := make([]Work, len(resp.Message.Items))
+	for i, w := range resp.Message.Items {
+		out[i] = wireWorkToWork(w, i+1)
+	}
+	return out, nil
+}
+
+// GetWork fetches a single work by DOI.
+func (c *Client) GetWork(ctx context.Context, doi string) (Work, error) {
+	doi = normaliseDOI(doi)
+	rawURL := c.baseURL + "/works/" + url.PathEscape(doi)
+
+	var resp workResp
+	if err := c.getJSON(ctx, rawURL, &resp); err != nil {
+		return Work{}, err
+	}
+	return wireWorkToWork(resp.Message, 0), nil
+}
+
+// GetJournal fetches a single journal by ISSN.
+func (c *Client) GetJournal(ctx context.Context, issn string) (Journal, error) {
+	rawURL := c.baseURL + "/journals/" + url.PathEscape(issn)
+
+	var resp journalResp
+	if err := c.getJSON(ctx, rawURL, &resp); err != nil {
+		return Journal{}, err
+	}
+	return wireJournalToJournal(resp.Message, 0), nil
+}
+
+// SearchJournals searches the /journals endpoint by title keyword.
+func (c *Client) SearchJournals(ctx context.Context, query string, limit int) ([]Journal, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	params := url.Values{}
+	params.Set("query", query)
+	params.Set("rows", strconv.Itoa(limit))
+	rawURL := c.baseURL + "/journals?" + params.Encode()
+
+	var resp journalsListResp
+	if err := c.getJSON(ctx, rawURL, &resp); err != nil {
+		return nil, err
+	}
+	out := make([]Journal, len(resp.Message.Items))
+	for i, j := range resp.Message.Items {
+		out[i] = wireJournalToJournal(j, i+1)
+	}
+	return out, nil
+}
+
+// ListTypes returns all Crossref work type identifiers.
+func (c *Client) ListTypes(ctx context.Context) ([]WorkType, error) {
+	rawURL := c.baseURL + "/types"
+
+	var resp typesResp
+	if err := c.getJSON(ctx, rawURL, &resp); err != nil {
+		return nil, err
+	}
+	out := make([]WorkType, len(resp.Message))
+	for i, t := range resp.Message {
+		out[i] = WorkType(t)
+	}
+	return out, nil
 }
