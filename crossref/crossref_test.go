@@ -242,6 +242,109 @@ func TestListTypes(t *testing.T) {
 	}
 }
 
+func TestSearchFunders(t *testing.T) {
+	const body = `{
+		"status": "ok",
+		"message": {
+			"items": [
+				{
+					"id": "501100001809",
+					"name": "National Natural Science Foundation of China",
+					"location": "China",
+					"alt-names": ["NSFC", "NNSF of China"]
+				},
+				{
+					"id": "100000001",
+					"name": "National Science Foundation",
+					"location": "United States",
+					"alt-names": ["NSF"]
+				}
+			]
+		}
+	}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/funders" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	funders, err := c.SearchFunders(context.Background(), "national science", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(funders) != 2 {
+		t.Fatalf("got %d funders, want 2", len(funders))
+	}
+	if funders[0].ID != "501100001809" {
+		t.Errorf("ID = %q, want 501100001809", funders[0].ID)
+	}
+	if funders[0].Name != "National Natural Science Foundation of China" {
+		t.Errorf("Name = %q", funders[0].Name)
+	}
+	if funders[0].Location != "China" {
+		t.Errorf("Location = %q, want China", funders[0].Location)
+	}
+	if len(funders[0].AltNames) != 2 {
+		t.Errorf("AltNames len = %d, want 2", len(funders[0].AltNames))
+	}
+	if funders[0].Rank != 1 {
+		t.Errorf("Rank = %d, want 1", funders[0].Rank)
+	}
+	if funders[1].Rank != 2 {
+		t.Errorf("Rank = %d, want 2", funders[1].Rank)
+	}
+}
+
+func TestSearchMembers(t *testing.T) {
+	const body = `{
+		"status": "ok",
+		"message": {
+			"items": [
+				{
+					"id": 297,
+					"primary-name": "Springer Science and Business Media LLC",
+					"location": "Berlin, Germany",
+					"prefixes": ["10.1007", "10.1023"]
+				}
+			]
+		}
+	}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/members" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	members, err := c.SearchMembers(context.Background(), "springer", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(members) != 1 {
+		t.Fatalf("got %d members, want 1", len(members))
+	}
+	if members[0].ID != 297 {
+		t.Errorf("ID = %d, want 297", members[0].ID)
+	}
+	if members[0].Name != "Springer Science and Business Media LLC" {
+		t.Errorf("Name = %q", members[0].Name)
+	}
+	if members[0].Location != "Berlin, Germany" {
+		t.Errorf("Location = %q", members[0].Location)
+	}
+	if len(members[0].Prefixes) != 2 {
+		t.Errorf("Prefixes len = %d, want 2", len(members[0].Prefixes))
+	}
+	if members[0].Rank != 1 {
+		t.Errorf("Rank = %d, want 1", members[0].Rank)
+	}
+}
+
 func TestFormatAuthors(t *testing.T) {
 	tests := []struct {
 		name    string

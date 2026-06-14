@@ -92,6 +92,8 @@ crossref is an independent tool and is not affiliated with Crossref.`,
 		app.workCmd(),
 		app.journalCmd(),
 		app.journalsCmd(),
+		app.fundersCmd(),
+		app.membersCmd(),
 		app.typesCmd(),
 		newVersionCmd(),
 	)

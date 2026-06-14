@@ -242,6 +242,32 @@ type typesResp struct {
 	} `json:"message"`
 }
 
+type wireFunder struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Location string   `json:"location"`
+	AltNames []string `json:"alt-names"`
+}
+
+type fundersListResp struct {
+	Message struct {
+		Items []wireFunder `json:"items"`
+	} `json:"message"`
+}
+
+type wireMember struct {
+	ID       int      `json:"id"`
+	Name     string   `json:"primary-name"`
+	Location string   `json:"location"`
+	Prefixes []string `json:"prefixes"`
+}
+
+type membersListResp struct {
+	Message struct {
+		Items []wireMember `json:"items"`
+	} `json:"message"`
+}
+
 // ─── mapping helpers ─────────────────────────────────────────────────────────
 
 func wireWorkToWork(w wireWork, rank int) Work {
@@ -394,6 +420,74 @@ func (c *Client) ListTypes(ctx context.Context) ([]WorkType, error) {
 	out := make([]WorkType, len(resp.Message.Items))
 	for i, t := range resp.Message.Items {
 		out[i] = WorkType(t)
+	}
+	return out, nil
+}
+
+func wireFunderToFunder(f wireFunder, rank int) Funder {
+	return Funder{
+		Rank:     rank,
+		ID:       f.ID,
+		Name:     f.Name,
+		Location: f.Location,
+		AltNames: f.AltNames,
+		URL:      "https://search.crossref.org/funding?q=" + url.QueryEscape(f.ID),
+	}
+}
+
+func wireMemberToMember(m wireMember, rank int) Member {
+	return Member{
+		Rank:     rank,
+		ID:       m.ID,
+		Name:     m.Name,
+		Location: m.Location,
+		Prefixes: m.Prefixes,
+		URL:      "https://www.crossref.org/members/prep/",
+	}
+}
+
+// SearchFunders searches the /funders endpoint by name keyword.
+func (c *Client) SearchFunders(ctx context.Context, query string, limit int) ([]Funder, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	params := url.Values{}
+	if query != "" {
+		params.Set("query", query)
+	}
+	params.Set("rows", strconv.Itoa(limit))
+	rawURL := c.baseURL + "/funders?" + params.Encode()
+
+	var resp fundersListResp
+	if err := c.getJSON(ctx, rawURL, &resp); err != nil {
+		return nil, err
+	}
+	out := make([]Funder, len(resp.Message.Items))
+	for i, f := range resp.Message.Items {
+		out[i] = wireFunderToFunder(f, i+1)
+	}
+	return out, nil
+}
+
+// SearchMembers searches the /members endpoint by name keyword.
+func (c *Client) SearchMembers(ctx context.Context, query string, limit int) ([]Member, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	params := url.Values{}
+	if query != "" {
+		params.Set("query", query)
+	}
+	params.Set("rows", strconv.Itoa(limit))
+	rawURL := c.baseURL + "/members?" + params.Encode()
+
+	var resp membersListResp
+	if err := c.getJSON(ctx, rawURL, &resp); err != nil {
+		return nil, err
+	}
+	out := make([]Member, len(resp.Message.Items))
+	for i, m := range resp.Message.Items {
+		out[i] = wireMemberToMember(m, i+1)
 	}
 	return out, nil
 }
