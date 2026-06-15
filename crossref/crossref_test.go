@@ -345,6 +345,190 @@ func TestSearchMembers(t *testing.T) {
 	}
 }
 
+func TestGetWorkNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	_, err := c.GetWork(context.Background(), "10.0000/doesnotexist")
+	if err != ErrNotFound {
+		t.Fatalf("got %v, want ErrNotFound", err)
+	}
+}
+
+func TestGetWorkDOINormalize(t *testing.T) {
+	var gotRawPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// RawPath preserves percent-encoding; Path unescapes it.
+		if r.URL.RawPath != "" {
+			gotRawPath = r.URL.RawPath
+		} else {
+			gotRawPath = r.URL.Path
+		}
+		const body = `{
+			"status": "ok",
+			"message-type": "work",
+			"message": {
+				"DOI": "10.9999/norm",
+				"title": ["Norm Test"],
+				"published": {"date-parts": [[2020, 1, 1]]},
+				"is-referenced-by-count": 0
+			}
+		}`
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	_, err := c.GetWork(context.Background(), "https://doi.org/10.9999/norm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// RawPath preserves the percent-encoded slash from url.PathEscape
+	if gotRawPath != "/works/10.9999%2Fnorm" {
+		t.Errorf("raw path = %q, want /works/10.9999%%2Fnorm", gotRawPath)
+	}
+}
+
+func TestSearchJournals(t *testing.T) {
+	const body = `{
+		"status": "ok",
+		"message-type": "journal-list",
+		"message": {
+			"total-results": 2,
+			"items": [
+				{
+					"ISSN": ["0028-0836"],
+					"title": "Nature",
+					"publisher": "Springer Nature",
+					"subjects": [{"name": "Multidisciplinary", "ASJC": 1000}],
+					"URL": "https://www.nature.com/"
+				},
+				{
+					"ISSN": ["2041-1723"],
+					"title": "Nature Communications",
+					"publisher": "Springer Nature",
+					"subjects": [{"name": "Multidisciplinary", "ASJC": 1000}],
+					"URL": "https://www.nature.com/ncomms/"
+				}
+			]
+		}
+	}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/journals" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	journals, err := c.SearchJournals(context.Background(), "nature", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(journals) != 2 {
+		t.Fatalf("got %d journals, want 2", len(journals))
+	}
+	if journals[0].Title != "Nature" {
+		t.Errorf("Title = %q, want Nature", journals[0].Title)
+	}
+	if journals[0].Rank != 1 {
+		t.Errorf("Rank = %d, want 1", journals[0].Rank)
+	}
+}
+
+func TestYearFallbackToIssued(t *testing.T) {
+	const body = `{
+		"status": "ok",
+		"message-type": "work",
+		"message": {
+			"DOI": "10.9999/issued",
+			"title": ["Issued Year Test"],
+			"issued": {"date-parts": [[2021]]},
+			"is-referenced-by-count": 0
+		}
+	}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	work, err := c.GetWork(context.Background(), "10.9999/issued")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if work.Year != "2021" {
+		t.Errorf("Year = %q, want 2021", work.Year)
+	}
+}
+
+func TestEmptyTitle(t *testing.T) {
+	const body = `{
+		"status": "ok",
+		"message-type": "work",
+		"message": {
+			"DOI": "10.9999/notitle",
+			"title": [],
+			"published": {"date-parts": [[2020, 1, 1]]},
+			"is-referenced-by-count": 0
+		}
+	}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	work, err := c.GetWork(context.Background(), "10.9999/notitle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if work.Title != "" {
+		t.Errorf("Title = %q, want empty string", work.Title)
+	}
+}
+
+func TestNormaliseDOI(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"10.1038/nature12373", "10.1038/nature12373"},
+		{"https://doi.org/10.1038/nature12373", "10.1038/nature12373"},
+		{"http://doi.org/10.1038/nature12373", "10.1038/nature12373"},
+		{"https://dx.doi.org/10.1038/nature12373", "10.1038/nature12373"},
+		{"http://dx.doi.org/10.1038/nature12373", "10.1038/nature12373"},
+		{"doi:10.1038/nature12373", "10.1038/nature12373"},
+		{"  10.1038/nature12373  ", "10.1038/nature12373"},
+	}
+	for _, tc := range tests {
+		got := normaliseDOI(tc.input)
+		if got != tc.want {
+			t.Errorf("normaliseDOI(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestSearchWorksRowsParam(t *testing.T) {
+	var gotRows string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRows = r.URL.Query().Get("rows")
+		const body = `{"status":"ok","message":{"total-results":0,"items":[]}}`
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	_, _ = c.SearchWorks(context.Background(), "test", 5, "")
+	if gotRows != "5" {
+		t.Errorf("rows param = %q, want 5", gotRows)
+	}
+}
+
 func TestFormatAuthors(t *testing.T) {
 	tests := []struct {
 		name    string

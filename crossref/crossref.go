@@ -170,6 +170,8 @@ func normaliseDOI(doi string) string {
 	doi = strings.TrimSpace(doi)
 	doi = strings.TrimPrefix(doi, "https://doi.org/")
 	doi = strings.TrimPrefix(doi, "http://doi.org/")
+	doi = strings.TrimPrefix(doi, "https://dx.doi.org/")
+	doi = strings.TrimPrefix(doi, "http://dx.doi.org/")
 	doi = strings.TrimPrefix(doi, "doi:")
 	return doi
 }
@@ -182,6 +184,7 @@ type wireWork struct {
 	Author         []wireAuthor   `json:"author"`
 	ContainerTitle []string       `json:"container-title"`
 	Published      *wireDateParts `json:"published"`
+	Issued         *wireDateParts `json:"issued"`
 	Type           string         `json:"type"`
 	Publisher      string         `json:"publisher"`
 	ReferencedBy   int            `json:"is-referenced-by-count"`
@@ -282,6 +285,8 @@ func wireWorkToWork(w wireWork, rank int) Work {
 	year := ""
 	if w.Published != nil && len(w.Published.DateParts) > 0 && len(w.Published.DateParts[0]) > 0 {
 		year = strconv.Itoa(w.Published.DateParts[0][0])
+	} else if w.Issued != nil && len(w.Issued.DateParts) > 0 && len(w.Issued.DateParts[0]) > 0 {
+		year = strconv.Itoa(w.Issued.DateParts[0][0])
 	}
 	doi := strings.ToLower(w.DOI)
 	return Work{
